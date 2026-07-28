@@ -192,11 +192,15 @@ async def get_logs(run_id: str) -> Response:
 @app.on_event("startup")
 async def startup():
     global tg_app, APP_BASE_URL
-    tg_app = create_telegram_app()
 
-    # If Render doesn't set RENDER_EXTERNAL_URL in local dev, you can set EXTERNAL_URL manually
+    # Ensure RENDER_EXTERNAL_URL is available
     if not APP_BASE_URL:
         APP_BASE_URL = os.environ.get("EXTERNAL_URL", "http://localhost:8000")
+
+    tg_app = create_telegram_app()
+
+    # Initialize the telegram Application
+    await tg_app.initialize()
 
     # Set webhook
     webhook_url = f"{APP_BASE_URL}/webhook"
