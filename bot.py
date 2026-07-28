@@ -211,6 +211,11 @@ async def shutdown():
     if tg_app:
         await tg_app.bot.delete_webhook()
 
+
+@app.post("/debug-echo")
+async def debug_echo(request: Request) -> dict:
+    body = await request.json()
+    return {"received": body}
 # =========================
 # RUN COMMAND
 # =========================
