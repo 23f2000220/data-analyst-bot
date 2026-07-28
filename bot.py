@@ -2,9 +2,10 @@ import os
 import json
 import uuid
 import asyncio
-from typing import Optional, ist, Dict, Any
+from typing import Optional, Any
 
 from fastapi import FastAPI, Request, Response
+from openai import AsyncOpenAI
 from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, filters
 
@@ -25,10 +26,9 @@ LOG_BASE_PATH = "/logs"
 app = FastAPI()
 
 # In-memory logs: run_id -> list of entries
-# For a simple assignment, in-memory is fine if the process stays alive during grading.
-RUN_LOGS: Dict[str, List[Dict[str, Any]]] = {}
+RUN_LOGS: dict[str, list[dict[str, Any]]] = {}
 
-def add_log(run_id: str, entry: Dict[str, Any]) -> None:
+def add_log(run_id: str, entry: dict[str, Any]) -> None:
     if run_id not in RUN_LOGS:
         RUN_LOGS[run_id] = []
     RUN_LOGS[run_id].append(entry)
