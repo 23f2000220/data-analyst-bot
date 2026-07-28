@@ -3,9 +3,10 @@ import json
 import uuid
 import asyncio
 from typing import Optional, Any
+from openai import OpenAI
 
 from fastapi import FastAPI, Request, Response
-from openai import AsyncOpenAI
+
 from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, filters
 
@@ -37,21 +38,23 @@ def get_log_jsonl(run_id: str) -> str:
     entries = RUN_LOGS.get(run_id, [])
     return "\n".join(json.dumps(e) for e in entries)
 
+from openai import OpenAI
+
 # =========================
 # OPENAI CLIENT
 # =========================
-from openai import AsyncOpenAI
-
 openai_kwargs = {"api_key": OPENAI_API_KEY}
 if OPENAI_BASE_URL:
     openai_kwargs["base_url"] = OPENAI_BASE_URL
 
-client = AsyncOpenAI(**openai_kwargs)
+client = OpenAI(**openai_kwargs)
+
 
 # =========================
 # LLM “DATA ANALYST” LOGIC
 # =========================
-async def call_data_analyst_llm(user_text: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+import asyncio
+async def call_data_analyst_llm(user_text: str, conversation_history=None) -> dict:
     """
     Returns a dict with:
       - answer: whatever shape the question asks for
@@ -66,12 +69,7 @@ async def call_data_analyst_llm(user_text: str, conversation_history: Optional[L
             "role": "system",
             "content": (
                 "You are a data-analysis assistant. "
-                "You will receive a user message that may contain a data-analysis question, "
-                "possibly with inline data or links to public datasets (e.g. MOSPI).\n\n"
-                "Your task:\n"
-                "1. Understand the question (if multiple turns, focus on the last message).\n"
-                "2. Reason about what data is needed and how to answer.\n"
-                "3. Produce a final answer in the exact JSON shape requested by the user.\n\n"
+                "You will receive a user message that may contain a data-analysis question.\n\n"
                 "You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
                 "- \"answer\": the answer, in the exact shape the user requested.\n"
                 "- \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n\n"
@@ -81,37 +79,43 @@ async def call_data_analyst_llm(user_text: str, conversation_history: Optional[L
     ]
 
     if conversation_history:
-        # If you store history, you can append here as "user"/"assistant" messages.
         messages.extend(conversation_history)
 
     messages.append({"role": "user", "content": user_text})
 
-    resp = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0,
-    )
-
-    raw_text = resp.choices[0].message.content.strip()
-
-    # Parse JSON
     try:
-        payload = json.loads(raw_text)
-    except Exception:
-        # Fallback if LLM messes up formatting
-        payload = {
-            "answer": {"error": "Failed to parse LLM response as JSON"},
+        def _call():
+            return client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+
+        resp = await asyncio.to_thread(_call)
+        raw_text = resp.choices[0].message.content.strip()
+
+        try:
+            payload = json.loads(raw_text)
+        except Exception:
+            payload = {
+                "answer": {"error": "Failed to parse LLM response as JSON"},
+                "log_url": "<LOG_URL>"
+            }
+
+        if "log_url" not in payload:
+            payload["log_url"] = "<LOG_URL>"
+
+        return {"llm_raw": raw_text, "payload": payload}
+
+    except Exception as e:
+        # Catch everything for now (including 429) so the bot still replies
+        fallback_payload = {
+            "answer": {"error": f"LLM call failed: {type(e).__name__}"},
             "log_url": "<LOG_URL>"
         }
+        return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
 
-    # Ensure log_url placeholder exists
-    if "log_url" not in payload:
-        payload["log_url"] = "<LOG_URL>"
-
-    return {
-        "llm_raw": raw_text,
-        "payload": payload
-    }
 
 # =========================
 # TELEGRAM APP
