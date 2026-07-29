@@ -229,6 +229,10 @@ async def shutdown():
 async def debug_echo(request: Request) -> dict:
     body = await request.json()
     return {"received": body}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 # =========================
 # RUN COMMAND
 # =========================
