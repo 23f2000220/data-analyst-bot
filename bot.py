@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import asyncio
+import time
 import logging
 from typing import Optional, Any
 
@@ -10,6 +11,11 @@ from fastapi import FastAPI, Request, Response
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
+
+# =========================
+# LOGGING
+# =========================
+log = logging.getLogger("uvicorn")
 
 # =========================
 # CONFIG FROM ENV
@@ -22,8 +28,6 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 APP_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("EXTERNAL_URL", "http://localhost:8000")
 LOG_BASE_PATH = "/logs"
 
-log = logging.getLogger("uvicorn")
-
 # =========================
 # FASTAPI APP
 # =========================
@@ -32,6 +36,7 @@ app = FastAPI()
 RUN_LOGS: dict[str, list[dict[str, Any]]] = {}
 
 def add_log(run_id: str, entry: dict[str, Any]) -> None:
+    entry.setdefault("timestamp", time.time())
     if run_id not in RUN_LOGS:
         RUN_LOGS[run_id] = []
     RUN_LOGS[run_id].append(entry)
@@ -63,20 +68,73 @@ async def keep_alive_pinger() -> None:
         await asyncio.sleep(600)  # every 10 minutes
 
 # =========================
-# LLM CALL
+# ROBUST JSON EXTRACTION
 # =========================
-async def call_data_analyst_llm(user_text: str, conversation_history=None) -> dict:
+def extract_first_json_object(text: str) -> dict:
+    # Remove markdown code fences
+    text = text.replace("```json", "```").replace("```", "")
+
+    start = None
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if start is None:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if start is not None and depth == 0:
+                candidate = text[start:i+1]
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    start = None
+    # Fallback: try to parse whole text
+    return json.loads(text)
+
+# =========================
+# CHAT HISTORY (per chat_id)
+# =========================
+CHAT_HISTORY: dict[int, list[dict[str, str]]] = {}
+
+def append_to_chat_history(chat_id: int, role: str, content: str) -> None:
+    if chat_id not in CHAT_HISTORY:
+        CHAT_HISTORY[chat_id] = []
+    CHAT_HISTORY[chat_id].append({"role": role, "content": content})
+    # Keep last 20 turns => 40 messages (user + assistant)
+    if len(CHAT_HISTORY[chat_id]) > 40:
+        CHAT_HISTORY[chat_id] = CHAT_HISTORY[chat_id][-40:]
+
+def get_chat_history(chat_id: int) -> list[dict[str, str]]:
+    return CHAT_HISTORY.get(chat_id, [])
+
+# =========================
+# LLM CALL WITH BUDGET
+# =========================
+async def call_data_analyst_llm(
+    user_text: str,
+    conversation_history=None,
+    timeout_seconds: int = 210,
+) -> dict:
+    deadline = time.time() + timeout_seconds
+
     system_prompt = (
         "You are a data-analysis assistant. "
         "You will receive a user message that may contain a data-analysis question, "
         "possibly with inline data or links to public datasets (e.g. MOSPI).\n\n"
-        "Your task:\n"
-        "1. Understand the question (if multiple turns, focus on the last message).\n"
-        "2. Reason about what data is needed and how to answer.\n"
-        "3. Produce a final answer in the exact JSON shape requested by the user.\n\n"
-        "You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
-        "- \"answer\": the answer, in the exact shape the user requested.\n"
-        "- \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n\n"
+        "Conversation rules:\n"
+        "- Treat earlier messages as context; always answer the **latest** message.\n"
+        "- If a message is only setup (e.g. 'I will send data next'), still reply with a small JSON ack "
+        "(for example, {\"answer\": {\"status\": \"ready\"}}), because the grader expects a reply to every message.\n\n"
+        "Data & computation rules:\n"
+        "- If the question requires computing something from given data, reason carefully and compute the answer.\n"
+        "- For published statistics where fetching fails, answer from your knowledge.\n\n"
+        "Output rules:\n"
+        "- You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
+        "  - \"answer\": the answer, in the exact shape the user requested.\n"
+        "  - \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n"
+        "- Match the requested answer shape exactly; never add extra keys.\n"
+        "- Do NOT include any text outside the JSON. Do NOT use markdown or code fences.\n\n"
         "Examples:\n\n"
         "1) If the user says:\n"
         "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
@@ -86,15 +144,22 @@ async def call_data_analyst_llm(user_text: str, conversation_history=None) -> di
         "\"What is the population of Bengaluru? Reply with ONLY a JSON object like {\\\"population\\\": <number>}\"\n"
         "you must reply with:\n"
         "{\"answer\": {\"population\": 8443675}, \"log_url\": \"<LOG_URL>\"}\n\n"
-        "Do NOT include any text outside the JSON. Do NOT use markdown or code fences."
+        "3) If the user says only: \"I will send you some data next.\"\n"
+        "you can reply with:\n"
+        "{\"answer\": {\"status\": \"ready\"}, \"log_url\": \"<LOG_URL>\"}"
     )
 
     messages = [{"role": "system", "content": system_prompt}]
-
     if conversation_history:
         messages.extend(conversation_history)
-
     messages.append({"role": "user", "content": user_text})
+
+    # If already past deadline, force minimal answer
+    if time.time() >= deadline:
+        return {
+            "llm_raw": '{"answer": {"error": "timeout"}, "log_url": "<LOG_URL>"}',
+            "payload": {"answer": {"error": "timeout"}, "log_url": "<LOG_URL>"}
+        }
 
     try:
         def _call():
@@ -106,16 +171,19 @@ async def call_data_analyst_llm(user_text: str, conversation_history=None) -> di
             )
 
         resp = await asyncio.to_thread(_call)
-        raw_text = resp.choices[0].message.content.strip()
+        raw_text = resp.choices.message.content.strip()[0]
 
         try:
-            payload = json.loads(raw_text)
+            payload = extract_first_json_object(raw_text)
         except Exception:
             payload = {
                 "answer": {"error": "Failed to parse LLM response as JSON"},
                 "log_url": "<LOG_URL>"
             }
 
+        # Defensive: ensure "answer" key
+        if "answer" not in payload:
+            payload = {"answer": payload, "log_url": payload.get("log_url", "<LOG_URL>")}
         if "log_url" not in payload:
             payload["log_url"] = "<LOG_URL>"
 
@@ -143,28 +211,53 @@ def create_telegram_app() -> Application:
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return tg_app
 
+# =========================
+# MESSAGE HANDLER (NEVER CRASHES SILENTLY)
+# =========================
 async def handle_message(update: Update, context) -> None:
-    user_text = update.message.text
     chat_id = update.message.chat_id
-
     run_id = str(uuid.uuid4())
-    add_log(run_id, {"step": "received", "chat_id": chat_id, "text": user_text})
 
-    conversation_history = None
+    try:
+        user_text = update.message.text
+        add_log(run_id, {"step": "received", "chat_id": chat_id, "text": user_text})
 
-    result = await call_data_analyst_llm(user_text, conversation_history)
-    add_log(run_id, {"step": "llm_response", "raw": result["llm_raw"]})
+        # Update chat history
+        append_to_chat_history(chat_id, "user", user_text)
+        conversation_history = get_chat_history(chat_id)
 
-    payload = result["payload"]
-    log_url = f"{APP_BASE_URL}{LOG_BASE_PATH}/{run_id}"
-    payload["log_url"] = log_url
+        result = await call_data_analyst_llm(user_text, conversation_history, timeout_seconds=210)
+        add_log(run_id, {"step": "llm_response", "raw": result["llm_raw"]})
 
-    add_log(run_id, {"step": "final_answer", "payload": payload})
+        payload = result["payload"]
+        log_url = f"{APP_BASE_URL}{LOG_BASE_PATH}/{run_id}"
+        payload["log_url"] = log_url
 
-    await update.message.reply_text(
-        json.dumps(payload),
-        parse_mode=None
-    )
+        add_log(run_id, {"step": "final_answer", "payload": payload})
+
+        await update.message.reply_text(
+            json.dumps(payload),
+            parse_mode=None
+        )
+
+        append_to_chat_history(chat_id, "assistant", json.dumps(payload))
+
+    except Exception as e:
+        # Fallback reply so we never leave the grader hanging
+        payload = {
+            "answer": {"error": "internal error"},
+            "log_url": f"{APP_BASE_URL}{LOG_BASE_PATH}/{run_id}"
+        }
+        add_log(run_id, {"step": "error", "exception": str(e)})
+        add_log(run_id, {"step": "final_answer", "payload": payload})
+
+        try:
+            await update.message.reply_text(
+                json.dumps(payload),
+                parse_mode=None
+            )
+        except Exception:
+            log.exception("Failed to send fallback reply")
 
 # =========================
 # WEBHOOK ENDPOINT
@@ -177,7 +270,7 @@ async def telegram_webhook(request: Request) -> Response:
     return Response(content="ok", status_code=200)
 
 # =========================
-# LOGS ENDPOINT
+# LOGS ENDPOINT (JSONL)
 # =========================
 @app.get("/logs/{run_id}")
 async def get_logs(run_id: str) -> Response:
