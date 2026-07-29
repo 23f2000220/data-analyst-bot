@@ -23,9 +23,13 @@ log = logging.getLogger("uvicorn")
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_BASE_URL: Optional[str] = os.environ.get("OPENAI_BASE_URL")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 
-APP_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("EXTERNAL_URL", "http://localhost:8000")
+APP_BASE_URL = (
+    os.environ.get("RENDER_EXTERNAL_URL")
+    or os.environ.get("EXTERNAL_URL")
+    or "http://localhost:8000"
+)
 LOG_BASE_PATH = "/logs"
 
 # =========================
@@ -264,10 +268,27 @@ async def handle_message(update: Update, context) -> None:
 # =========================
 @app.post("/webhook")
 async def telegram_webhook(request: Request) -> Response:
-    body = await request.json()
-    update = Update.de_json(body, tg_app.bot)
-    await tg_app.process_update(update)
-    return Response(content="ok", status_code=200)
+    log.info("Received Telegram webhook request")
+    try:
+        body = await request.json()
+        log.info(f"Webhook body type: {type(body)}, content: {body}")
+
+        # Telegram normally sends a single update dict, not a list
+        if isinstance(body, list):
+            # If somehow a list arrives, just take the first element
+            log.warning("Received a list of updates; using the first one")
+            body = body[0]
+
+        update = Update.de_json(body, tg_app.bot)
+        log.info(f"Decoded update: chat_id={update.message.chat_id if update.message else None}")
+
+        await tg_app.process_update(update)
+        log.info("Processed update successfully")
+        return Response(content="ok", status_code=200)
+
+    except Exception as e:
+        log.exception(f"Error processing webhook: {e}")
+        return Response(content="error", status_code=500)
 
 # =========================
 # LOGS ENDPOINT (JSONL)
@@ -291,12 +312,10 @@ async def health():
 # =========================
 # STARTUP / SHUTDOWN
 # =========================
+
 @app.on_event("startup")
 async def startup():
-    global tg_app, APP_BASE_URL
-
-    if not APP_BASE_URL:
-        APP_BASE_URL = os.environ.get("EXTERNAL_URL", "http://localhost:8000")
+    global tg_app
 
     log.info(f"Using APP_BASE_URL={APP_BASE_URL}")
 
@@ -315,6 +334,7 @@ async def startup():
     # Start keep-alive pinger
     asyncio.create_task(keep_alive_pinger())
 
+    
 @app.on_event("shutdown")
 async def shutdown():
     if tg_app:
