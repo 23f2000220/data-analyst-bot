@@ -16,7 +16,7 @@ from telegram.ext import Application, MessageHandler, filters
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_BASE_URL: Optional[str] = os.environ.get("OPENAI_BASE_URL")  # e.g. https://your-proxy.com/v1
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 
 APP_BASE_URL = os.environ["RENDER_EXTERNAL_URL"]  # Render sets this; fallback in local test
 LOG_BASE_PATH = "/logs"
