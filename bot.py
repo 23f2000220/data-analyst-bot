@@ -64,19 +64,30 @@ async def call_data_analyst_llm(user_text: str, conversation_history=None) -> di
 
     # Build a simple conversation context if you want multi-turn support later.
     # For now, we just use the last user message.
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a data-analysis assistant. "
-                "You will receive a user message that may contain a data-analysis question.\n\n"
-                "You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
-                "- \"answer\": the answer, in the exact shape the user requested.\n"
-                "- \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n\n"
-                "Do NOT include any text outside the JSON. Do NOT use markdown or code fences."
-            )
-        }
-    ]
+    system_prompt = (
+        "You are a data-analysis assistant. "
+        "You will receive a user message that may contain a data-analysis question, "
+        "possibly with inline data or links to public datasets (e.g. MOSPI).\n\n"
+        "Your task:\n"
+        "1. Understand the question (if multiple turns, focus on the last message).\n"
+        "2. Reason about what data is needed and how to answer.\n"
+        "3. Produce a final answer in the exact JSON shape requested by the user.\n\n"
+        "You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
+        "- \"answer\": the answer, in the exact shape the user requested.\n"
+        "- \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n\n"
+        "Examples:\n\n"
+        "1) If the user says:\n"
+        "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
+        "you must reply with:\n"
+        "{\"answer\": {\"state\": \"Assam\"}, \"log_url\": \"<LOG_URL>\"}\n\n"
+        "2) If the user says:\n"
+        "\"What is the population of Bengaluru? Reply with ONLY a JSON object like {\\\"population\\\": <number>}\"\n"
+        "you must reply with:\n"
+        "{\"answer\": {\"population\": 8443675}, \"log_url\": \"<LOG_URL>\"}\n\n"
+        "Do NOT include any text outside the JSON. Do NOT use markdown or code fences."
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
 
     if conversation_history:
         messages.extend(conversation_history)
@@ -109,13 +120,11 @@ async def call_data_analyst_llm(user_text: str, conversation_history=None) -> di
         return {"llm_raw": raw_text, "payload": payload}
 
     except Exception as e:
-        # Catch everything for now (including 429) so the bot still replies
         fallback_payload = {
             "answer": {"error": f"LLM call failed: {type(e).__name__}"},
             "log_url": "<LOG_URL>"
         }
         return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
-
 
 # =========================
 # TELEGRAM APP
