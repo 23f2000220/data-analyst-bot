@@ -175,7 +175,7 @@ async def call_data_analyst_llm(
             )
 
         resp = await asyncio.to_thread(_call)
-        raw_text = resp.choices.message.content.strip()[0]
+        raw_text = resp.choices[0].message.content.strip()
 
         try:
             payload = extract_first_json_object(raw_text)
@@ -334,7 +334,7 @@ async def startup():
     # Start keep-alive pinger
     asyncio.create_task(keep_alive_pinger())
 
-    
+
 @app.on_event("shutdown")
 async def shutdown():
     if tg_app:
