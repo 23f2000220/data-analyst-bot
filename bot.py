@@ -254,17 +254,17 @@ def run_python_tool(code: str) -> str:
 
 
 
-import os
+# import os
 
-MODEL_CANDIDATES = [
-    m.strip() for m in os.environ.get(
-        "MODEL_CANDIDATES",
-        OPENAI_MODEL  # falls back to your existing single model if unset
-    ).split(",")
-    if m.strip()
-]
+# MODEL_CANDIDATES = [
+#     m.strip() for m in os.environ.get(
+#         "MODEL_CANDIDATES",
+#         OPENAI_MODEL  # falls back to your existing single model if unset
+#     ).split(",")
+#     if m.strip()
+# ]
 
-MAX_TURNS = 6
+MAX_TURNS = 4
 
 SYSTEM_PROMPT = (
     "You are a data-analysis assistant. "
@@ -387,6 +387,22 @@ async def _run_with_model(
         "log_url": "<LOG_URL>"
     }
     return {"llm_raw": "(no final response — loop exhausted)", "payload": fallback_payload}, tool_call_count
+
+async def call_data_analyst_llm(
+    user_text: str,
+    conversation_history=None,
+    run_id: str = None,
+    timeout_seconds: int = 210,
+) -> dict:
+    deadline = time.time() + timeout_seconds
+
+    base_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if conversation_history:
+        base_messages.extend(conversation_history)
+    base_messages.append({"role": "user", "content": user_text})
+
+    result, _ = await _run_with_model(OPENAI_MODEL, base_messages, run_id, deadline)
+    return result
 
 
 
