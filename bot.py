@@ -115,91 +115,185 @@ def get_chat_history(chat_id: int) -> list[dict[str, str]]:
 # =========================
 # LLM CALL WITH BUDGET
 # =========================
+# async def call_data_analyst_llm(
+#     user_text: str,
+#     conversation_history=None,
+#     timeout_seconds: int = 210,
+# ) -> dict:
+#     deadline = time.time() + timeout_seconds
+
+#     system_prompt = (
+#         "You are a data-analysis assistant. "
+#         "You will receive a user message that may contain a data-analysis question, "
+#         "possibly with inline data or links to public datasets (e.g. MOSPI).\n\n"
+#         "Conversation rules:\n"
+#         "- Treat earlier messages as context; always answer the **latest** message.\n"
+#         "- If a message is only setup (e.g. 'I will send data next'), still reply with a small JSON ack "
+#         "(for example, {\"answer\": {\"status\": \"ready\"}}), because the grader expects a reply to every message.\n\n"
+#         "Data & computation rules:\n"
+#         "- If the question requires computing something from given data, reason carefully and compute the answer.\n"
+#         "- For published statistics where fetching fails, answer from your knowledge.\n\n"
+#         "Output rules:\n"
+#         "- You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
+#         "  - \"answer\": the answer, in the exact shape the user requested.\n"
+#         "  - \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n"
+#         "- Match the requested answer shape exactly; never add extra keys.\n"
+#         "- Do NOT include any text outside the JSON. Do NOT use markdown or code fences.\n\n"
+#         "Examples:\n\n"
+#         "1) If the user says:\n"
+#         "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
+#         "you must reply with:\n"
+#         "{\"answer\": {\"state\": \"Assam\"}, \"log_url\": \"<LOG_URL>\"}\n\n"
+#         "2) If the user says:\n"
+#         "\"What is the population of Bengaluru? Reply with ONLY a JSON object like {\\\"population\\\": <number>}\"\n"
+#         "you must reply with:\n"
+#         "{\"answer\": {\"population\": 8443675}, \"log_url\": \"<LOG_URL>\"}\n\n"
+#         "3) If the user says only: \"I will send you some data next.\"\n"
+#         "you can reply with:\n"
+#         "{\"answer\": {\"status\": \"ready\"}, \"log_url\": \"<LOG_URL>\"}"
+#     )
+
+#     messages = [{"role": "system", "content": system_prompt}]
+#     if conversation_history:
+#         messages.extend(conversation_history)
+#     messages.append({"role": "user", "content": user_text})
+
+#     # If already past deadline, force minimal answer
+#     if time.time() >= deadline:
+#         return {
+#             "llm_raw": '{"answer": {"error": "timeout"}, "log_url": "<LOG_URL>"}',
+#             "payload": {"answer": {"error": "timeout"}, "log_url": "<LOG_URL>"}
+#         }
+
+#     try:
+#         def _call():
+#             return client.chat.completions.create(
+#                 model=OPENAI_MODEL,
+#                 messages=messages,
+#                 temperature=0,
+#                 response_format={"type": "json_object"},
+#             )
+
+#         resp = await asyncio.to_thread(_call)
+#         raw_text = resp.choices[0].message.content.strip()
+
+#         try:
+#             payload = extract_first_json_object(raw_text)
+#         except Exception:
+#             payload = {
+#                 "answer": {"error": "Failed to parse LLM response as JSON"},
+#                 "log_url": "<LOG_URL>"
+#             }
+
+#         # Defensive: ensure "answer" key
+#         if "answer" not in payload:
+#             payload = {"answer": payload, "log_url": payload.get("log_url", "<LOG_URL>")}
+#         if "log_url" not in payload:
+#             payload["log_url"] = "<LOG_URL>"
+
+#         return {"llm_raw": raw_text, "payload": payload}
+
+#     except Exception as e:
+#         fallback_payload = {
+#             "answer": {"error": f"LLM call failed: {type(e).__name__}"},
+#             "log_url": "<LOG_URL>"
+#         }
+#         return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
+
+
+
+
 async def call_data_analyst_llm(
     user_text: str,
     conversation_history=None,
+    run_id: str = None,
     timeout_seconds: int = 210,
 ) -> dict:
     deadline = time.time() + timeout_seconds
-
-    system_prompt = (
-        "You are a data-analysis assistant. "
-        "You will receive a user message that may contain a data-analysis question, "
-        "possibly with inline data or links to public datasets (e.g. MOSPI).\n\n"
-        "Conversation rules:\n"
-        "- Treat earlier messages as context; always answer the **latest** message.\n"
-        "- If a message is only setup (e.g. 'I will send data next'), still reply with a small JSON ack "
-        "(for example, {\"answer\": {\"status\": \"ready\"}}), because the grader expects a reply to every message.\n\n"
-        "Data & computation rules:\n"
-        "- If the question requires computing something from given data, reason carefully and compute the answer.\n"
-        "- For published statistics where fetching fails, answer from your knowledge.\n\n"
-        "Output rules:\n"
-        "- You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
-        "  - \"answer\": the answer, in the exact shape the user requested.\n"
-        "  - \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n"
-        "- Match the requested answer shape exactly; never add extra keys.\n"
-        "- Do NOT include any text outside the JSON. Do NOT use markdown or code fences.\n\n"
-        "Examples:\n\n"
-        "1) If the user says:\n"
-        "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
-        "you must reply with:\n"
-        "{\"answer\": {\"state\": \"Assam\"}, \"log_url\": \"<LOG_URL>\"}\n\n"
-        "2) If the user says:\n"
-        "\"What is the population of Bengaluru? Reply with ONLY a JSON object like {\\\"population\\\": <number>}\"\n"
-        "you must reply with:\n"
-        "{\"answer\": {\"population\": 8443675}, \"log_url\": \"<LOG_URL>\"}\n\n"
-        "3) If the user says only: \"I will send you some data next.\"\n"
-        "you can reply with:\n"
-        "{\"answer\": {\"status\": \"ready\"}, \"log_url\": \"<LOG_URL>\"}"
-    )
 
     messages = [{"role": "system", "content": system_prompt}]
     if conversation_history:
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_text})
 
-    # If already past deadline, force minimal answer
-    if time.time() >= deadline:
-        return {
-            "llm_raw": '{"answer": {"error": "timeout"}, "log_url": "<LOG_URL>"}',
-            "payload": {"answer": {"error": "timeout"}, "log_url": "<LOG_URL>"}
-        }
+    MAX_TURNS = 6
 
-    try:
-        def _call():
-            return client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=messages,
-                temperature=0,
-                response_format={"type": "json_object"},
-            )
-
-        resp = await asyncio.to_thread(_call)
-        raw_text = resp.choices[0].message.content.strip()
+    for turn in range(MAX_TURNS):
+        if time.time() >= deadline:
+            break
 
         try:
-            payload = extract_first_json_object(raw_text)
-        except Exception:
-            payload = {
-                "answer": {"error": "Failed to parse LLM response as JSON"},
+            def _call():
+                return client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=messages,
+                    tools=tools,
+                    temperature=0,
+                )
+            resp = await asyncio.to_thread(_call)
+        except Exception as e:
+            fallback_payload = {
+                "answer": {"error": f"LLM call failed: {type(e).__name__}"},
                 "log_url": "<LOG_URL>"
             }
+            return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
 
-        # Defensive: ensure "answer" key
-        if "answer" not in payload:
-            payload = {"answer": payload, "log_url": payload.get("log_url", "<LOG_URL>")}
-        if "log_url" not in payload:
-            payload["log_url"] = "<LOG_URL>"
+        msg = resp.choices[0].message
 
-        return {"llm_raw": raw_text, "payload": payload}
+        if msg.tool_calls:
+            # TODO 1: append the assistant's own message (as a dict, not the raw object)
+            messages.append(msg.model_dump())
 
-    except Exception as e:
-        fallback_payload = {
-            "answer": {"error": f"LLM call failed: {type(e).__name__}"},
-            "log_url": "<LOG_URL>"
-        }
-        return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
+            for tool_call in msg.tool_calls:
+                # TODO 2: pull the code string out of the JSON arguments
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                    code = args.get("code", "")
+                except Exception:
+                    code = ""
 
+                result = run_python_tool(code)
+
+                if run_id:
+                    add_log(run_id, {
+                        "step": "tool_call",
+                        "code": code,
+                        "output": result,
+                    })
+
+                # TODO 3: append the matching tool result message
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result,
+                })
+
+            continue  # loop back so the model sees the tool results
+
+        else:
+            # No tool call — this should be the final answer
+            raw_text = (msg.content or "").strip()
+            try:
+                payload = extract_first_json_object(raw_text)
+            except Exception:
+                payload = {
+                    "answer": {"error": "Failed to parse LLM response as JSON"},
+                    "log_url": "<LOG_URL>"
+                }
+
+            if "answer" not in payload:
+                payload = {"answer": payload, "log_url": payload.get("log_url", "<LOG_URL>")}
+            if "log_url" not in payload:
+                payload["log_url"] = "<LOG_URL>"
+
+            return {"llm_raw": raw_text, "payload": payload}
+
+    # TODO 4: ran out of turns or time without a final answer
+    fallback_payload = {
+        "answer": {"error": "ran out of turns/time before reaching a final answer"},
+        "log_url": "<LOG_URL>"
+    }
+    return {"llm_raw": "(no final response — loop exhausted)", "payload": fallback_payload}
 # =========================
 # TELEGRAM APP
 # =========================
