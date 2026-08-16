@@ -253,49 +253,66 @@ def run_python_tool(code: str) -> str:
     return output[:8000]
 
 
-async def call_data_analyst_llm(
-    user_text: str,
-    conversation_history=None,
-    run_id: str = None,
-    timeout_seconds: int = 210,
-) -> dict:
-    deadline = time.time() + timeout_seconds
-    system_prompt = (
-        "You are a data-analysis assistant. "
-        "You will receive a user message that may contain a data-analysis question, "
-        "possibly with inline data or links to public datasets (e.g. MOSPI, USGS, WHO).\n\n"
-        "Conversation rules:\n"
-        "- Treat earlier messages as context; always answer the **latest** message.\n"
-        "- If a message is only setup (e.g. 'I will send data next'), still reply with a small JSON ack "
-        "(for example, {\"answer\": {\"status\": \"ready\"}}), because the grader expects a reply to every message.\n\n"
-        "Data & computation rules:\n"
-        "- If the question requires computing something from a dataset, or references a public dataset "
-        "or API (USGS, MOSPI, WHO GHO, etc.), you MUST use the run_python tool to fetch and compute the "
-        "real answer. Never guess or recall a number/date/country from memory when it can be fetched or computed.\n"
-        "- Only fall back to answering from your own knowledge if fetching genuinely fails after a "
-        "reasonable retry, or the fact is not the kind of thing any API/dataset would contain.\n\n"
-        "Output rules:\n"
-        "- You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
-        "  - \"answer\": the answer, in the exact shape the user requested.\n"
-        "  - \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n"
-        "- Match the requested answer shape exactly; never add extra keys.\n"
-        "- Do NOT include any text outside the JSON. Do NOT use markdown or code fences.\n\n"
-        "Examples:\n\n"
-        "1) If the user says:\n"
-        "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
-        "you must reply with:\n"
-        "{\"answer\": {\"state\": \"Assam\"}, \"log_url\": \"<LOG_URL>\"}\n\n"
-        "2) If the user says only: \"I will send you some data next.\"\n"
-        "you can reply with:\n"
-        "{\"answer\": {\"status\": \"ready\"}, \"log_url\": \"<LOG_URL>\"}"
-    )
 
-    messages = [{"role": "system", "content": system_prompt}]
-    if conversation_history:
-        messages.extend(conversation_history)
-    messages.append({"role": "user", "content": user_text})
+import os
 
-    MAX_TURNS = 6
+MODEL_CANDIDATES = [
+    m.strip() for m in os.environ.get(
+        "MODEL_CANDIDATES",
+        OPENAI_MODEL  # falls back to your existing single model if unset
+    ).split(",")
+    if m.strip()
+]
+
+MAX_TURNS = 6
+
+SYSTEM_PROMPT = (
+    "You are a data-analysis assistant. "
+    "You will receive a user message that may contain a data-analysis question, "
+    "possibly with inline data or links/references to public datasets or APIs.\n\n"
+    "Conversation rules:\n"
+    "- Treat earlier messages as context; always answer the **latest** message.\n"
+    "- If a message is only setup (e.g. 'I will send data next'), still reply with a small JSON ack "
+    "(for example, {\"answer\": {\"status\": \"ready\"}}), because the grader expects a reply to every message.\n\n"
+    "Data & computation rules:\n"
+    "- For any question referencing a named dataset, indicator, or public API, you must attempt at "
+    "least one run_python fetch before answering — even if you're not fully certain of the exact "
+    "endpoint or query syntax. Write your best-guess request first.\n"
+    "- If a fetch fails or returns unexpected data, use the error/response to try a different URL "
+    "pattern, query parameter, or approach — treat this like iterative debugging, not a one-shot attempt.\n"
+    "- Only conclude data is genuinely unavailable after multiple distinct attempts have failed.\n"
+    "- Never answer 'unavailable', 'unknown', or a placeholder value without tool-call evidence in "
+    "this conversation that you actually tried.\n\n"
+    "Output rules:\n"
+    "- You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
+    "  - \"answer\": the answer, in the exact shape the user requested.\n"
+    "  - \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n"
+    "- Match the requested answer shape exactly; never add extra keys.\n"
+    "- Do NOT include any text outside the JSON. Do NOT use markdown or code fences.\n\n"
+    "Examples:\n\n"
+    "1) If the user says:\n"
+    "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
+    "you must reply with:\n"
+    "{\"answer\": {\"state\": \"Assam\"}, \"log_url\": \"<LOG_URL>\"}\n\n"
+    "2) If the user says only: \"I will send you some data next.\"\n"
+    "you can reply with:\n"
+    "{\"answer\": {\"status\": \"ready\"}, \"log_url\": \"<LOG_URL>\"}"
+)
+
+
+async def _run_with_model(
+    model: str,
+    base_messages: list,
+    run_id: Optional[str],
+    deadline: float,
+) -> tuple[dict, int]:
+    """
+    Runs the tool-calling loop with a single model.
+    Returns (result_dict, tool_call_count).
+    result_dict has the same {"llm_raw":..., "payload":...} shape as before.
+    """
+    messages = list(base_messages)  # copy — don't mutate the caller's list
+    tool_call_count = 0
 
     for turn in range(MAX_TURNS):
         if time.time() >= deadline:
@@ -304,7 +321,7 @@ async def call_data_analyst_llm(
         try:
             def _call():
                 return client.chat.completions.create(
-                    model=OPENAI_MODEL,
+                    model=model,
                     messages=messages,
                     tools=tools,
                     temperature=0,
@@ -315,16 +332,15 @@ async def call_data_analyst_llm(
                 "answer": {"error": f"LLM call failed: {type(e).__name__}"},
                 "log_url": "<LOG_URL>"
             }
-            return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
+            return {"llm_raw": f"Error: {e}", "payload": fallback_payload}, tool_call_count
 
         msg = resp.choices[0].message
 
         if msg.tool_calls:
-            # TODO 1: append the assistant's own message (as a dict, not the raw object)
             messages.append(msg.model_dump())
 
             for tool_call in msg.tool_calls:
-                # TODO 2: pull the code string out of the JSON arguments
+                tool_call_count += 1
                 try:
                     args = json.loads(tool_call.function.arguments)
                     code = args.get("code", "")
@@ -336,21 +352,20 @@ async def call_data_analyst_llm(
                 if run_id:
                     add_log(run_id, {
                         "step": "tool_call",
+                        "model": model,
                         "code": code,
                         "output": result,
                     })
 
-                # TODO 3: append the matching tool result message
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": result,
                 })
 
-            continue  # loop back so the model sees the tool results
+            continue
 
         else:
-            # No tool call — this should be the final answer
             raw_text = (msg.content or "").strip()
             try:
                 payload = extract_first_json_object(raw_text)
@@ -365,14 +380,71 @@ async def call_data_analyst_llm(
             if "log_url" not in payload:
                 payload["log_url"] = "<LOG_URL>"
 
-            return {"llm_raw": raw_text, "payload": payload}
+            return {"llm_raw": raw_text, "payload": payload}, tool_call_count
 
-    # TODO 4: ran out of turns or time without a final answer
     fallback_payload = {
         "answer": {"error": "ran out of turns/time before reaching a final answer"},
         "log_url": "<LOG_URL>"
     }
-    return {"llm_raw": "(no final response — loop exhausted)", "payload": fallback_payload}
+    return {"llm_raw": "(no final response — loop exhausted)", "payload": fallback_payload}, tool_call_count
+
+
+async def call_data_analyst_llm(
+    user_text: str,
+    conversation_history=None,
+    run_id: str = None,
+    timeout_seconds: int = 210,
+) -> dict:
+    deadline = time.time() + timeout_seconds
+
+    base_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if conversation_history:
+        base_messages.extend(conversation_history)
+    base_messages.append({"role": "user", "content": user_text})
+
+    # Heuristic: a "real" data question is more than a short setup/ack message.
+    # Short messages (e.g. "I will send data next") are allowed to skip tool use.
+    looks_like_real_question = len(user_text.split()) > 8
+
+    last_result = None
+    for model in MODEL_CANDIDATES:
+        if time.time() >= deadline:
+            break
+
+        result, tool_call_count = await _run_with_model(model, base_messages, run_id, deadline)
+        last_result = result
+
+        answer_str = json.dumps(result["payload"].get("answer", {})).lower()
+        looks_like_giveup = any(
+            phrase in answer_str for phrase in ["unavailable", "unknown", "n/a", "error"]
+        )
+
+        if run_id:
+            add_log(run_id, {
+                "step": "model_attempt",
+                "model": model,
+                "tool_call_count": tool_call_count,
+                "gave_up_without_trying": looks_like_real_question and tool_call_count == 0 and looks_like_giveup,
+            })
+
+        # Success condition: either it used tools, or the question didn't need them,
+        # or it didn't give a give-up-style answer.
+        if tool_call_count > 0 or not looks_like_real_question or not looks_like_giveup:
+            return result
+
+        # Otherwise: this model skipped tool use on a real question and gave up — try next model
+
+    # All models exhausted (or none configured) — return whatever we last got
+    if last_result:
+        return last_result
+
+    fallback_payload = {
+        "answer": {"error": "no models available"},
+        "log_url": "<LOG_URL>"
+    }
+    return {"llm_raw": "(no models attempted)", "payload": fallback_payload}
+
+
 # =========================
 # TELEGRAM APP
 # =========================
