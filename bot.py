@@ -200,7 +200,57 @@ def get_chat_history(chat_id: int) -> list[dict[str, str]]:
 #         }
 #         return {"llm_raw": f"Error: {e}", "payload": fallback_payload}
 
+import io
+import contextlib
+import numpy as np
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 
+# ---- Piece 1: tool definition (menu GPT sees) ----
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": (
+                "Execute Python code to fetch and/or analyze data. "
+                "pd, np, requests, and BeautifulSoup are already imported. "
+                "Always print() the specific value you need — only stdout is returned to you."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute."
+                    }
+                },
+                "required": ["code"],
+            },
+        },
+    }
+]
+
+# ---- Piece 2: executor ----
+def run_python_tool(code: str) -> str:
+    namespace = {
+        "pd": pd,
+        "np": np,
+        "requests": requests,
+        "BeautifulSoup": BeautifulSoup,
+    }
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec(code, namespace)
+        output = buf.getvalue()
+        if not output.strip():
+            output = "(code ran with no output — remember to print() the value you need)"
+    except Exception as e:
+        output = f"ERROR: {type(e).__name__}: {e}"
+
+    return output[:8000]
 
 
 async def call_data_analyst_llm(
@@ -210,6 +260,35 @@ async def call_data_analyst_llm(
     timeout_seconds: int = 210,
 ) -> dict:
     deadline = time.time() + timeout_seconds
+    system_prompt = (
+        "You are a data-analysis assistant. "
+        "You will receive a user message that may contain a data-analysis question, "
+        "possibly with inline data or links to public datasets (e.g. MOSPI, USGS, WHO).\n\n"
+        "Conversation rules:\n"
+        "- Treat earlier messages as context; always answer the **latest** message.\n"
+        "- If a message is only setup (e.g. 'I will send data next'), still reply with a small JSON ack "
+        "(for example, {\"answer\": {\"status\": \"ready\"}}), because the grader expects a reply to every message.\n\n"
+        "Data & computation rules:\n"
+        "- If the question requires computing something from a dataset, or references a public dataset "
+        "or API (USGS, MOSPI, WHO GHO, etc.), you MUST use the run_python tool to fetch and compute the "
+        "real answer. Never guess or recall a number/date/country from memory when it can be fetched or computed.\n"
+        "- Only fall back to answering from your own knowledge if fetching genuinely fails after a "
+        "reasonable retry, or the fact is not the kind of thing any API/dataset would contain.\n\n"
+        "Output rules:\n"
+        "- You MUST reply with a SINGLE JSON object and NOTHING ELSE. The JSON must have exactly two keys:\n"
+        "  - \"answer\": the answer, in the exact shape the user requested.\n"
+        "  - \"log_url\": a placeholder string \"<LOG_URL>\" which the system will replace with a real public JSONL URL.\n"
+        "- Match the requested answer shape exactly; never add extra keys.\n"
+        "- Do NOT include any text outside the JSON. Do NOT use markdown or code fences.\n\n"
+        "Examples:\n\n"
+        "1) If the user says:\n"
+        "\"Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY a JSON object like {\\\"state\\\": \\\"<state name>\\\"}\"\n"
+        "you must reply with:\n"
+        "{\"answer\": {\"state\": \"Assam\"}, \"log_url\": \"<LOG_URL>\"}\n\n"
+        "2) If the user says only: \"I will send you some data next.\"\n"
+        "you can reply with:\n"
+        "{\"answer\": {\"status\": \"ready\"}, \"log_url\": \"<LOG_URL>\"}"
+    )
 
     messages = [{"role": "system", "content": system_prompt}]
     if conversation_history:

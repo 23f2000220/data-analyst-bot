@@ -3,3 +3,7 @@ httpx
 openai
 uvicorn
 fastapi
+pandas
+numpy
+requests
+beautifulsoup4
