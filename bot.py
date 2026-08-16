@@ -389,61 +389,6 @@ async def _run_with_model(
     return {"llm_raw": "(no final response — loop exhausted)", "payload": fallback_payload}, tool_call_count
 
 
-async def call_data_analyst_llm(
-    user_text: str,
-    conversation_history=None,
-    run_id: str = None,
-    timeout_seconds: int = 210,
-) -> dict:
-    deadline = time.time() + timeout_seconds
-
-    base_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if conversation_history:
-        base_messages.extend(conversation_history)
-    base_messages.append({"role": "user", "content": user_text})
-
-    # Heuristic: a "real" data question is more than a short setup/ack message.
-    # Short messages (e.g. "I will send data next") are allowed to skip tool use.
-    looks_like_real_question = len(user_text.split()) > 8
-
-    last_result = None
-    for model in MODEL_CANDIDATES:
-        if time.time() >= deadline:
-            break
-
-        result, tool_call_count = await _run_with_model(model, base_messages, run_id, deadline)
-        last_result = result
-
-        answer_str = json.dumps(result["payload"].get("answer", {})).lower()
-        looks_like_giveup = any(
-            phrase in answer_str for phrase in ["unavailable", "unknown", "n/a", "error"]
-        )
-
-        if run_id:
-            add_log(run_id, {
-                "step": "model_attempt",
-                "model": model,
-                "tool_call_count": tool_call_count,
-                "gave_up_without_trying": looks_like_real_question and tool_call_count == 0 and looks_like_giveup,
-            })
-
-        # Success condition: either it used tools, or the question didn't need them,
-        # or it didn't give a give-up-style answer.
-        if tool_call_count > 0 or not looks_like_real_question or not looks_like_giveup:
-            return result
-
-        # Otherwise: this model skipped tool use on a real question and gave up — try next model
-
-    # All models exhausted (or none configured) — return whatever we last got
-    if last_result:
-        return last_result
-
-    fallback_payload = {
-        "answer": {"error": "no models available"},
-        "log_url": "<LOG_URL>"
-    }
-    return {"llm_raw": "(no models attempted)", "payload": fallback_payload}
-
 
 # =========================
 # TELEGRAM APP
